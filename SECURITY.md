@@ -147,6 +147,11 @@ Some features call an AI service (Gemini) over the network. Do not enter secrets
 - Honest limits: an Android app cannot cool the phone or change the charger. This only gives warnings and steps. The charger hint is a hint, not proof. If the temperature or power is not reported by the phone, nothing is said and nothing is guessed.
 - Uses the existing announcement switch "thermal warning" (on by default). Permissions: none added. No new library.
 
+## Announcements and charger advice (changed in 1.1.19)
+- All spoken announcements go through one queue. The same words are not spoken twice within 20 seconds. Nothing is replayed on Bluetooth any more. Nothing is uploaded; the text is spoken by the phone's own text-to-speech.
+- The charger advice speaks only when charging is slow and the battery temperature is rising. It is quiet when the temperature is normal, when the charger has shown it is fast, at 95% or more, and when level or power is not reported. The fixed 40 and 45 degree warnings are separate and unchanged.
+- When this happens on a USB port, the advice says a file transfer or low power port may be the cause. That is a guess from the plug type: Android does not tell an app whether files are being copied. The app does not read file names, storage or the USB data. No new permission.
+
 ## Journey mode (new in 1.1.18)
 
 - A manual switch in the Saver card for long trips. It never starts by itself and ends by itself after 12 hours.

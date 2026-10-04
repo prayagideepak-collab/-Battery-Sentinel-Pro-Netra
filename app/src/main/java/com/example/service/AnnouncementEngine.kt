@@ -78,6 +78,8 @@ class AnnouncementEngine(private val context: Context) : TextToSpeech.OnInitList
 
     // Event ID tracking for absolute deduplication across observers/recomposition
     private val processedEventIds = mutableSetOf<String>()
+    private val recentSpoken = HashMap<String, Long>()
+    private val lastByCategory = HashMap<String, Long>()
 
     // State Tracking & Baseline for Deduplication inside Announcement Engine
     private var isBaselineEstablished = false
@@ -147,9 +149,6 @@ class AnnouncementEngine(private val context: Context) : TextToSpeech.OnInitList
 
                 override fun onDone(utteranceId: String?) {
                     Log.d(TAG, "TTS done: $utteranceId")
-                    if (utteranceId != null && !utteranceId.endsWith(BT_REPLAY_SUFFIX) && replayOnBluetoothIfConnected()) {
-                        return
-                    }
                     currentPlayingAnnouncement?.let {
                         if (it.speechState == AnnouncementSpeechState.SPEAKING) {
                             it.speechState = AnnouncementSpeechState.COMPLETED
@@ -220,7 +219,7 @@ class AnnouncementEngine(private val context: Context) : TextToSpeech.OnInitList
         val now = System.currentTimeMillis()
 
         // Early temperature advice while charging (trend based) and the "charger or cable may be faulty" hint.
-        val advice = chargerThermalGuard.onSample(now, state.isCharging, state.temperatureCelsius, state.powerWatts)
+        val advice = chargerThermalGuard.onSample(now, state.isCharging, state.temperatureCelsius, state.powerWatts, state.batteryLevel, state.pluggedType == com.example.model.CanonicalPluggedType.USB)
         if (advice != null && settings.announceThermalWarning) {
             val danger = advice == ChargerThermalGuard.Advice.PRE_DANGER
             enqueue(
@@ -236,9 +235,12 @@ class AnnouncementEngine(private val context: Context) : TextToSpeech.OnInitList
 
         if (state.isCharging == true && state.announcementSpeed != CanonicalChargingSpeed.UNAVAILABLE) {
             val currentSpeed = state.announcementSpeed
-            if (currentSpeed != lastAnnouncementSpeed) {
+            val coolingDown = isInCooldown(lastByCategory["CHARGING_SPEED"], now, CATEGORY_COOLDOWN_MS.getValue("CHARGING_SPEED"))
+            if (currentSpeed != lastAnnouncementSpeed && !coolingDown) {
                 lastAnnouncementSpeed = currentSpeed
-                if (settings.announceChargingSpeed) {
+                // Near full the phone tapers the current on purpose, so "slow" there says nothing about the charger.
+                val taperAtFull = currentSpeed == CanonicalChargingSpeed.SLOW && (state.batteryLevel ?: 0) >= ChargerThermalGuard.NEAR_FULL_PERCENT
+                if (settings.announceChargingSpeed && !taperAtFull) {
                     val speechText = when (currentSpeed) {
                         CanonicalChargingSpeed.SLOW -> "Slow charging."
                         CanonicalChargingSpeed.NORMAL -> "Normal charging."
@@ -546,6 +548,31 @@ class AnnouncementEngine(private val context: Context) : TextToSpeech.OnInitList
             return
         }
 
+        // 3a. Per-category cooldown: charging-speed change announcements wait at least 60 seconds after the last one,
+        // even if the speed changed again meanwhile. No continuous repeating.
+        val cooldown = CATEGORY_COOLDOWN_MS[item.category]
+        if (cooldown != null) {
+            val nowMs = System.currentTimeMillis()
+            if (isInCooldown(lastByCategory[item.category], nowMs, cooldown)) {
+                Log.d(TAG, "Announcement held by ${item.category} cooldown -> ${item.text}")
+                return
+            }
+            lastByCategory[item.category] = nowMs
+        }
+
+        // 3b. One central ledger for every announcement type: the same words are never spoken twice
+        // within DEDUPE_WINDOW_MS, whatever path produced them (event, state change, test).
+        // A late announcement is fine; a repeat is not. Manual previews are exempt.
+        if (item.category != "DIRECT_TEST") {
+            val nowMs = System.currentTimeMillis()
+            if (isRecentDuplicate(recentSpoken, item.text, nowMs, DEDUPE_WINDOW_MS)) {
+                Log.d(TAG, "Repeat announcement suppressed by central ledger -> ${item.text}")
+                return
+            }
+            recentSpoken[item.text] = nowMs
+            if (recentSpoken.size > 50) recentSpoken.entries.removeAll { nowMs - it.value > DEDUPE_WINDOW_MS }
+        }
+
         // 4. Discard obsolete low-priority announcements where safe
         if (item.priority == AnnouncementPriority.PHONE_BATTERY) {
             queue.removeAll { it.priority == AnnouncementPriority.PHONE_BATTERY }
@@ -682,28 +709,6 @@ class AnnouncementEngine(private val context: Context) : TextToSpeech.OnInitList
      * (media) stream, which Android routes to a connected Bluetooth device. Android does not promise speaker and
      * Bluetooth at the same moment, so this is sequential. Returns true when a replay was started.
      */
-    private fun replayOnBluetoothIfConnected(): Boolean {
-        val item = currentPlayingAnnouncement ?: return false
-        if (item.speechState == AnnouncementSpeechState.CANCELLED) return false
-        return try {
-            val status = AudioRoutingInspector.inspectRouting(context)
-            if (!status.isBluetoothA2dpConnected) return false
-            val params = Bundle().apply {
-                putString(TextToSpeech.Engine.KEY_PARAM_UTTERANCE_ID, item.id + BT_REPLAY_SUFFIX)
-            }
-            val result = tts?.speak(item.text, TextToSpeech.QUEUE_ADD, params, item.id + BT_REPLAY_SUFFIX)
-            if (result == TextToSpeech.SUCCESS) {
-                Log.i(TAG, "Replaying on Bluetooth after speaker: '${item.text}'")
-                true
-            } else {
-                false
-            }
-        } catch (e: Exception) {
-            Log.e(TAG, "Bluetooth replay failed", e)
-            false
-        }
-    }
-
     private fun onSpeechFinished() {
         scope.launch(Dispatchers.IO) {
             try {
@@ -787,7 +792,22 @@ class AnnouncementEngine(private val context: Context) : TextToSpeech.OnInitList
             }
         }
 
+        /** The same announcement text is not spoken again within this window. */
+        internal const val DEDUPE_WINDOW_MS = 20_000L
+
+        /** Minimum gap between two announcements of the same category. */
+        internal val CATEGORY_COOLDOWN_MS: Map<String, Long> = mapOf("CHARGING_SPEED" to 60_000L)
+
+        /** True when something was announced less than [cooldownMs] ago. */
+        internal fun isInCooldown(lastAtMs: Long?, nowMs: Long, cooldownMs: Long): Boolean =
+            lastAtMs != null && nowMs - lastAtMs in 0 until cooldownMs
+
+        /** True when [key] was accepted less than [windowMs] ago. */
+        internal fun isRecentDuplicate(seen: Map<String, Long>, key: String, nowMs: Long, windowMs: Long): Boolean {
+            val prev = seen[key] ?: return false
+            return nowMs - prev in 0 until windowMs
+        }
+
         private const val TAG = "NetraAnnouncementEngine"
-        private const val BT_REPLAY_SUFFIX = "#bt"
     }
 }

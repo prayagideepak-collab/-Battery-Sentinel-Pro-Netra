@@ -4,6 +4,13 @@ All user-facing release notes are maintained here. The guarded release workflow 
 
 ## [Unreleased]
 
+- Patch: voice announcements no longer repeat. Every announcement now goes through one central queue and the same words are never spoken twice within 20 seconds, whatever caused them. The cause of the repeats was that, with a Bluetooth device connected, every announcement was deliberately spoken again on Bluetooth right after the phone speaker. That replay is removed: each announcement is spoken once. A late announcement is possible, a repeat is not.
+- Patch: the charger advice now speaks ONLY when charging is slow AND the battery temperature is rising. It stays quiet when the temperature is normal or falling, when the charger has shown it can charge fast, when the battery is at 95% or more (the phone slows charging on purpose near full), and when the level or power is not reported. "Slow charging." is no longer announced at 95% or more. The fixed 40 and 45 degree warnings are unchanged.
+- Patch: the "Slow / Normal / Fast charging" change announcement now waits at least 60 seconds after the previous one, even if the charging speed changed again meanwhile, so it cannot keep repeating. The new speed is announced once the 60 seconds are over if it still differs.
+- Patch: if slow charging and a rising temperature happen while the phone is plugged into a USB port, the advice now says a file transfer or a low power port may be the cause and that it may not be the charger. This is a guess from the plug type only: Android does not tell an app whether files are being copied, so the app cannot confirm a transfer. No new permission or library.
+
+## [1.1.18]
+
 - Journey mode for long trips: a manual switch in the Saver card that lasts up to 12 hours. While it is on and the phone is not charging, the Saver actions (lower brightness, shortest screen timeout, close background apps, clear notifications, each with its own switch) run right away instead of waiting for the battery level limit, and everything is put back when you plug in or it ends. It never starts by itself and adds no background work or new permission. Honest limit: Android only lets an app end background processes of other apps, so the saving can be small.
 
 ## [1.1.17]
